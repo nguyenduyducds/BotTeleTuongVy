@@ -1,0 +1,9 @@
+# .gitignore — Không upload file nhạy cảm lên GitHub
+.env
+*.session
+*.session-journal
+bot_data.db
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

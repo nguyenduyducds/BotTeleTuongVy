@@ -1,0 +1,12 @@
+# railway.toml — Cấu hình Railway deployment
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "python bot.py"
+restartPolicyType = "always"
+healthcheckPath = "/"
+
+# Volume để lưu database SQLite không bị mất khi redeploy
+[[volumes]]
+mountPath = "/app/data"

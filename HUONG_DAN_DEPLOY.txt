@@ -1,0 +1,118 @@
+📋 HƯỚNG DẪN DEPLOY BOT LÊN CLOUD (CHẠY 24/7 KHÔNG CẦN MÁY TÍNH)
+
+══════════════════════════════════════════════════════════════
+   CÁCH 1: RAILWAY.APP (Dễ nhất, 5 phút, miễn phí ~$5/tháng)
+══════════════════════════════════════════════════════════════
+
+BƯỚC 1 — Đẩy code lên GitHub:
+  1. Tạo tài khoản GitHub tại github.com
+  2. Tạo repo mới (đặt tên: BotTeleTuongVy), chọn Private
+  3. Mở PowerShell trong thư mục D:\BotTeleTuongVy, chạy lần lượt:
+     
+     git init
+     git add .
+     git commit -m "first commit"
+     git branch -M main
+     git remote add origin https://github.com/TEN_BAN/BotTeleTuongVy.git
+     git push -u origin main
+
+BƯỚC 2 — Deploy lên Railway:
+  1. Vào railway.app → Đăng nhập bằng GitHub
+  2. Bấm "New Project" → "Deploy from GitHub repo"
+  3. Chọn repo BotTeleTuongVy vừa tạo
+  4. Railway tự build Dockerfile
+
+BƯỚC 3 — Cài biến môi trường:
+  1. Trong Railway, vào tab "Variables"
+  2. Thêm các biến sau:
+     BOT_TOKEN    = (Token từ @BotFather)
+     TG_API_ID    = (Nếu dùng Userbot)
+     TG_API_HASH  = (Nếu dùng Userbot)
+  3. Bấm "Deploy" → Bot sẽ chạy 24/7!
+
+BƯỚC 4 — Thêm Volume (để database không bị mất khi restart):
+  1. Railway → Project → "Add Volume"
+  2. Mount path: /app/data
+  3. Thêm biến: DB_PATH=/app/data/bot_data.db
+
+══════════════════════════════════════════════════════════════
+   CÁCH 2: ORACLE CLOUD FREE TIER (Miễn phí MÃIMÃI, tốt nhất)
+══════════════════════════════════════════════════════════════
+
+BƯỚC 1 — Tạo tài khoản Oracle Cloud:
+  1. Vào cloud.oracle.com → Đăng ký (cần thẻ VISA/Mastercard để xác thực,
+     KHÔNG bị trừ tiền nếu chọn "Always Free")
+  2. Chọn vùng: ap-singapore-1 (gần VN nhất, ping thấp)
+
+BƯỚC 2 — Tạo máy chủ miễn phí:
+  1. Compute → Instances → Create Instance
+  2. Image: Ubuntu 22.04 LTS
+  3. Shape: VM.Standard.A1.Flex (ARM) — ALWAYS FREE
+     - 4 OCPUs, 24GB RAM (đủ chạy nhiều bot)
+  4. Tải SSH key về máy (để kết nối)
+  5. Bấm Create
+
+BƯỚC 3 — Cài Python và Bot:
+  Mở SSH, chạy lần lượt:
+
+  sudo apt update && sudo apt install -y python3 python3-pip git screen
+  pip3 install python-telegram-bot[job-queue] telethon python-dotenv
+  
+  git clone https://github.com/TEN_BAN/BotTeleTuongVy.git
+  cd BotTeleTuongVy
+  
+  # Tạo file .env
+  nano .env
+  # Điền vào:
+  # BOT_TOKEN=YOUR_TOKEN
+  # TG_API_ID=0
+  # TG_API_HASH=
+  
+  # Chạy bot trong màn hình nền (không tắt khi đóng SSH)
+  screen -S bot
+  python3 bot.py
+  # Nhấn Ctrl+A rồi D để detach
+  
+  # Lần sau SSH vào, xem bot đang chạy:
+  screen -r bot
+
+BƯỚC 4 — Tự khởi động lại nếu VPS restart (tùy chọn):
+  sudo nano /etc/systemd/system/telebot.service
+  
+  Nội dung:
+  [Unit]
+  Description=Telegram Ad Bot
+  After=network.target
+  
+  [Service]
+  User=ubuntu
+  WorkingDirectory=/home/ubuntu/BotTeleTuongVy
+  ExecStart=/usr/bin/python3 /home/ubuntu/BotTeleTuongVy/bot.py
+  Restart=always
+  RestartSec=10
+  
+  [Install]
+  WantedBy=multi-user.target
+  
+  sudo systemctl enable telebot
+  sudo systemctl start telebot
+
+══════════════════════════════════════════════════════════════
+   CÁCH 3: RENDER.COM (Miễn phí nhưng tắt sau 15p không dùng)
+══════════════════════════════════════════════════════════════
+
+  1. Vào render.com → New → Web Service
+  2. Kết nối GitHub repo
+  3. Runtime: Python 3 | Build Command: pip install -r requirements.txt
+  4. Start Command: python bot.py
+  5. Thêm Environment Variables tương tự Railway
+  ⚠️ Render miễn phí tắt service sau 15p idle → Bot sẽ bị ngắt
+     Dùng UptimeRobot ping mỗi 5p để giữ bot sống
+
+══════════════════════════════════════════════════════════════
+   GỢI Ý CUỐI
+══════════════════════════════════════════════════════════════
+
+  → Mới bắt đầu, muốn test nhanh:  RAILWAY (5 phút)
+  → Chạy lâu dài, tiết kiệm:       ORACLE CLOUD (miễn phí mãi)
+  → Không muốn GitHub:              Oracle Cloud upload thủ công qua SCP

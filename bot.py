@@ -238,19 +238,30 @@ async def show_setup_screen(update_or_query, context, is_callback=False):
 async def show_compose_prompt(update_or_query, context, is_callback=False):
     """Màn hình soạn bài — hướng dẫn gửi ảnh+text."""
     groups = db.get_groups(active_only=True)
-    group_names = " | ".join([f"<b>{html.escape(g['title'][:18])}</b>" for g in groups])
+
+    # Liệt kê rõ từng nhóm sẽ nhận bài
+    if groups:
+        group_lines = "\n".join([
+            f"   {'🟢'} {i+1}. <b>{html.escape(g['title'])}</b>"
+            for i, g in enumerate(groups)
+        ])
+    else:
+        group_lines = "   <i>⚠️ Chưa có nhóm nào! Vào 👥 Quản lý nhóm để thêm.</i>"
+
     text = (
         "✍️ <b>SOẠN BÀI ĐĂNG MỚI</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"📢 Sẽ đăng vào: {group_names or '<i>chưa có nhóm</i>'}\n\n"
-        "👇 <b>Gửi nội dung bài vào đây theo 1 trong các cách:</b>\n\n"
-        "🖼 <b>Bài có ảnh + chú thích:</b>\n"
-        "   → Gửi <b>ảnh</b> kèm <b>caption (nội dung bài)</b> vào đây.\n\n"
-        "📝 <b>Bài chỉ text + link:</b>\n"
-        "   → Gửi <b>tin nhắn văn bản</b> vào đây (kèm link quảng cáo nếu có).\n\n"
-        "↪️ <b>Forward bài sẵn từ kênh/nhóm khác:</b>\n"
-        "   → Chọn bài trong kênh → Chuyển tiếp (Forward) vào đây.\n\n"
-        "<i>💡 Mẹo: Nếu gửi ảnh, hãy gõ nội dung vào ô <b>Caption</b> ngay dưới ảnh trước khi bấm Gửi!</i>"
+        f"📢 <b>Bài sẽ được đăng vào {len(groups)} nhóm:</b>\n"
+        f"{group_lines}\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 <b>Gửi nội dung bài vào đây:</b>\n\n"
+        "🖼 <b>Có ảnh + chú thích:</b>\n"
+        "   → Gửi <b>ảnh</b> kèm <b>caption</b> (gõ nội dung vào ô Caption dưới ảnh)\n\n"
+        "📝 <b>Chỉ text / link:</b>\n"
+        "   → Gửi <b>tin nhắn văn bản</b> vào đây\n\n"
+        "↪️ <b>Forward bài từ kênh/nhóm khác:</b>\n"
+        "   → Chuyển tiếp (Forward) tin nhắn vào đây\n\n"
+        "<i>⚠️ Sau khi gửi, bot sẽ hỏi xác nhận trước khi lưu!</i>"
     )
     kb = [[InlineKeyboardButton("❌ Huỷ soạn bài", callback_data="compose_cancel")]]
     markup = InlineKeyboardMarkup(kb)
@@ -579,23 +590,48 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             await _handle_add_group_from_forward(update, context, msg)
             return
 
-        # Lưu bài soạn
-        context.user_data.pop("compose_mode", None)
-        post_id = _save_composed_post(msg, update.effective_chat.id)
-
+        # --- BƯỚC XÁC NHẬN TRƯỚC KHI LƯU ---
         has_media = bool(msg.photo or msg.video or msg.animation or msg.document)
-        media_lbl = "🖼 (Có ảnh/video)" if has_media else "📝 (Chỉ text)"
-        await msg.reply_text(
-            f"✅ <b>Đã lưu bài soạn #{post_id}! {media_lbl}</b>\n\n"
-            f"Bây giờ hãy cài <b>số lần đăng</b> và <b>lịch đăng</b> rồi bấm <b>▶️ Bật chạy</b>:",
-            parse_mode="HTML",
-            reply_markup=get_menu_keyboard(),
+        media_lbl = "🖼 Có ảnh/video" if has_media else "📝 Chỉ text"
+        raw_text  = msg.text or msg.caption or ""
+        preview   = raw_text[:300] + ("..." if len(raw_text) > 300 else "")
+
+        # Liệt kê nhóm sẽ nhận bài
+        groups = db.get_groups(active_only=True)
+        group_lines = "\n".join([
+            f"   🟢 {i+1}. <b>{html.escape(g['title'])}</b>"
+            for i, g in enumerate(groups)
+        ])
+
+        confirm_text = (
+            "👀 <b>XEM TRƯỚC BÀI ĐĂNG</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📌 Loại: <b>{media_lbl}</b>\n\n"
+            f"📢 Sẽ gửi vào <b>{len(groups)} nhóm:</b>\n"
+            f"{group_lines or '   <i>⚠️ Chưa có nhóm!</i>'}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📝 <b>Nội dung:</b>\n"
+            f"<i>{html.escape(preview) if preview else '(không có text)'}</i>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "✅ Bấm <b>XÁC NHẬN</b> để lưu và cài lịch\n"
+            "🔁 Bấm <b>Soạn lại</b> để gửi lại bài khác"
         )
-        await msg.reply_text(
-            build_post_detail_text(post_id),
-            parse_mode="HTML",
-            reply_markup=build_post_keyboard(post_id),
-        )
+
+        # Lưu message tạm chờ xác nhận
+        context.user_data["pending_compose"] = {
+            "chat_id": update.effective_chat.id,
+            "message_id": msg.message_id,
+        }
+        context.user_data.pop("compose_mode", None)
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ XÁC NHẬN ĐĂNG", callback_data="compose_confirm"),
+                InlineKeyboardButton("🔁 Soạn lại", callback_data="compose_restart"),
+            ],
+            [InlineKeyboardButton("❌ Huỷ bỏ", callback_data="compose_cancel")],
+        ])
+        await msg.reply_text(confirm_text, parse_mode="HTML", reply_markup=kb)
         return
 
     # 3. Chờ nhập userbot OTP / 2FA
@@ -785,9 +821,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "compose_cancel":
         context.user_data.pop("compose_mode", None)
+        context.user_data.pop("pending_compose", None)
         await q.edit_message_text(
             "❌ Đã huỷ soạn bài. Bấm <b>✍️ Soạn bài đăng mới</b> khi muốn soạn lại.",
             parse_mode="HTML",
+        )
+        return
+    if data == "compose_restart":
+        context.user_data.pop("pending_compose", None)
+        context.user_data["compose_mode"] = True
+        await show_compose_prompt(q, context, True)
+        return
+    if data == "compose_confirm":
+        pending = context.user_data.pop("pending_compose", None)
+        if not pending:
+            await q.answer("⚠️ Không tìm thấy bài soạn! Hãy soạn lại.", show_alert=True)
+            return
+        # Lấy message gốc để lưu
+        try:
+            orig_msg = await context.bot.forward_message(
+                chat_id=pending["chat_id"],
+                from_chat_id=pending["chat_id"],
+                message_id=pending["message_id"],
+            )
+        except Exception:
+            await q.answer("❌ Lỗi lưu bài! Thử lại.", show_alert=True)
+            return
+        post_id = _save_composed_post(orig_msg, pending["chat_id"])
+        await q.edit_message_text(
+            f"✅ <b>Đã lưu bài #{post_id}!</b>\n\n"
+            f"Bây giờ cài <b>số lần đăng</b> và <b>lịch đăng</b> rồi bấm <b>▶️ Bật chạy</b>:",
+            parse_mode="HTML",
+        )
+        await q.message.reply_text(
+            build_post_detail_text(post_id),
+            parse_mode="HTML",
+            reply_markup=build_post_keyboard(post_id),
         )
         return
     if data == "posts_start_all":

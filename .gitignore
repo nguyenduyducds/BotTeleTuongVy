@@ -2,6 +2,8 @@
 .env
 *.session
 *.session-journal
+userbot_session*
+media/
 bot_data.db
 __pycache__/
 *.pyc

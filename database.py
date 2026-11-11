@@ -40,6 +40,9 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
                     preview_text TEXT,
+                    content_text TEXT DEFAULT '',
+                    media_path TEXT DEFAULT '',
+                    media_type TEXT DEFAULT '',
                     storage_chat_id INTEGER NOT NULL,
                     storage_message_id INTEGER NOT NULL,
                     forward_origin_title TEXT,
@@ -51,6 +54,11 @@ class Database:
                     created_at TEXT NOT NULL
                 )
             """)
+            # Tự động nâng cấp DB cũ nếu thiếu cột content_text / media_path / media_type
+            existing_cols = {row["name"] for row in cursor.execute("PRAGMA table_info(posts)").fetchall()}
+            for col_name in ("content_text", "media_path", "media_type"):
+                if col_name not in existing_cols:
+                    cursor.execute(f"ALTER TABLE posts ADD COLUMN {col_name} TEXT DEFAULT ''")
 
             # Bảng theo dõi số lần đã đăng của từng bài vào từng nhóm
             cursor.execute("""
@@ -199,6 +207,9 @@ class Database:
         send_mode: str = "forward",
         max_runs: int = 3,
         interval_minutes: int = 30,
+        content_text: str = "",
+        media_path: str = "",
+        media_type: str = "",
     ) -> int:
         now = datetime.now().isoformat(timespec="seconds")
         with self._get_conn() as conn:
@@ -206,15 +217,19 @@ class Database:
             cursor.execute(
                 """
                 INSERT INTO posts (
-                    title, preview_text, storage_chat_id, storage_message_id,
+                    title, preview_text, content_text, media_path, media_type,
+                    storage_chat_id, storage_message_id,
                     forward_origin_title, send_mode, max_runs, interval_minutes,
                     fixed_times, active, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?)
                 """,
                 (
                     title,
                     preview_text,
+                    content_text,
+                    media_path,
+                    media_type,
                     storage_chat_id,
                     storage_message_id,
                     forward_origin_title,

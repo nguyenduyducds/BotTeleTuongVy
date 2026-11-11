@@ -2,12 +2,16 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Set
+from pathlib import Path
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
 
 from database import Database
+from userbot import get_manager
 
 logger = logging.getLogger(__name__)
+MEDIA_DIR = Path(__file__).parent / "media"
+MEDIA_DIR.mkdir(exist_ok=True)
 
 
 class SmartScheduler:
@@ -112,26 +116,121 @@ class SmartScheduler:
                     continue
         return True
 
+    async def _ensure_post_hydrated(self, bot, post: Dict[str, Any]) -> Dict[str, Any]:
+        """Tự động trích xuất full text + tải file ảnh về máy cho các bài cũ lưu trước khi nâng cấp."""
+        if (post.get("content_text") or "").strip() or (post.get("media_path") or "").strip():
+            return post
+        try:
+            temp_msg = await bot.forward_message(
+                chat_id=post["storage_chat_id"],
+                from_chat_id=post["storage_chat_id"],
+                message_id=post["storage_message_id"],
+            )
+            full_text = temp_msg.text or temp_msg.caption or ""
+            media_path_str = ""
+            media_type = ""
+            file_id = None
+            ext = ".jpg"
+            if temp_msg.photo:
+                file_id = temp_msg.photo[-1].file_id
+                media_type = "photo"
+                ext = ".jpg"
+            elif temp_msg.video:
+                file_id = temp_msg.video.file_id
+                media_type = "video"
+                ext = ".mp4"
+            elif temp_msg.animation:
+                file_id = temp_msg.animation.file_id
+                media_type = "animation"
+                ext = ".mp4"
+            elif temp_msg.document:
+                file_id = temp_msg.document.file_id
+                media_type = "document"
+                ext = Path(temp_msg.document.file_name or "file.bin").suffix or ".bin"
+
+            if file_id:
+                tg_file = await bot.get_file(file_id)
+                dest = MEDIA_DIR / f"post_{post['id']}{ext}"
+                await tg_file.download_to_drive(custom_path=str(dest))
+                media_path_str = str(dest)
+
+            try:
+                await bot.delete_message(chat_id=post["storage_chat_id"], message_id=temp_msg.message_id)
+            except Exception:
+                pass
+
+            self.db.update_post(
+                post["id"],
+                content_text=full_text,
+                media_path=media_path_str,
+                media_type=media_type,
+            )
+            post["content_text"] = full_text
+            post["media_path"] = media_path_str
+            post["media_type"] = media_type
+        except Exception as e:
+            logger.warning(f"Không thể hydrate bài cũ #{post['id']}: {e}")
+        return post
+
     async def send_single_post_to_group(
         self,
         bot,
         post: Dict[str, Any],
         group: Dict[str, Any],
         now: datetime,
-    ) -> bool:
-        """Thực hiện chuyển tiếp (Forward) hoặc sao chép (Copy) bài viết vào 1 nhóm."""
+    ) -> tuple[bool, str]:
+        """
+        Gửi bài viết vào 1 nhóm:
+        - Nếu đã đăng nhập Userbot (tài khoản cá nhân) -> Gửi trực tiếp bằng Userbot (KHÔNG CẦN thêm Bot vào nhóm!).
+        - Nếu chưa đăng nhập Userbot -> Gửi bằng Bot Token (yêu cầu Bot phải có trong nhóm).
+        """
         post_id = post["id"]
         group_id = group["chat_id"]
         progress = self.db.get_progress_entry(post_id, group_id)
+        del_old = self.db.get_setting("delete_previous_ad", "0") == "1"
+        old_msg_id = progress.get("last_message_id") if del_old else None
 
-        # Tuỳ chọn tự xoá bài quảng cáo cũ trong nhóm trước khi đăng bài mới
-        if self.db.get_setting("delete_previous_ad", "0") == "1":
-            old_msg_id = progress.get("last_message_id")
-            if old_msg_id:
-                try:
-                    await bot.delete_message(chat_id=group_id, message_id=int(old_msg_id))
-                except Exception:
-                    pass
+        ub = get_manager(self.db)
+        if ub.is_connected():
+            post = await self._ensure_post_hydrated(bot, post)
+            ok, sent_msg_id, detail = await ub.send_post(post, group, delete_old_msg_id=old_msg_id)
+            if ok:
+                interval_mins = max(1, int(post.get("interval_minutes", 30)))
+                next_avail = (now + timedelta(minutes=interval_mins)).isoformat(timespec="seconds")
+                now_str = now.isoformat(timespec="seconds")
+                self.db.record_post_sent(
+                    post_id=post_id,
+                    group_id=group_id,
+                    sent_message_id=sent_msg_id,
+                    sent_at=now_str,
+                    next_available_at=next_avail,
+                )
+                self.db.add_log(
+                    post_id=post_id,
+                    group_id=group_id,
+                    group_title=group["title"],
+                    post_title=post["title"],
+                    status="SUCCESS",
+                    detail=f"[Userbot] Lần {progress.get('runs_done', 0) + 1}/{post['max_runs'] if post['max_runs'] > 0 else '∞'}",
+                )
+                return True, detail
+            else:
+                self.db.add_log(
+                    post_id=post_id,
+                    group_id=group_id,
+                    group_title=group["title"],
+                    post_title=post["title"],
+                    status="ERROR",
+                    detail=f"[Userbot] {detail}"[:120],
+                )
+                return False, detail
+
+        # --- Chưa bật Userbot: gửi qua Bot API ---
+        if old_msg_id:
+            try:
+                await bot.delete_message(chat_id=group_id, message_id=int(old_msg_id))
+            except Exception:
+                pass
 
         try:
             if post.get("send_mode", "forward") == "forward":
@@ -166,19 +265,33 @@ class SmartScheduler:
                 status="SUCCESS",
                 detail=f"Lần {progress.get('runs_done', 0) + 1}/{post['max_runs'] if post['max_runs'] > 0 else '∞'}",
             )
-            return True
+            return True, "OK"
 
         except TelegramError as e:
-            logger.error(f"Lỗi khi gửi bài #{post_id} vào nhóm {group['title']} ({group_id}): {e}")
+            err_str = str(e)
+            logger.error(f"Lỗi khi gửi bài #{post_id} vào nhóm {group['title']} ({group_id}): {err_str}")
+            if "not a member" in err_str.lower() or "forbidden" in err_str.lower() or "chat not found" in err_str.lower():
+                friendly = "Bot chưa ở trong nhóm! Bấm 🔑 Userbot đăng nhập nick cá nhân để gửi KHÔNG CẦN thêm Bot."
+                # Tránh lặp lỗi mỗi 20s liên tục khi chưa đăng nhập Userbot
+                backoff = (now + timedelta(minutes=3)).isoformat(timespec="seconds")
+                with self.db._get_conn() as conn:
+                    conn.execute(
+                        "UPDATE post_group_progress SET next_available_at = ? WHERE post_id = ? AND group_id = ?",
+                        (backoff, post_id, group_id),
+                    )
+                    conn.commit()
+            else:
+                friendly = err_str[:100]
+
             self.db.add_log(
                 post_id=post_id,
                 group_id=group_id,
                 group_title=group["title"],
                 post_title=post["title"],
                 status="ERROR",
-                detail=str(e)[:120],
+                detail=friendly[:120],
             )
-            return False
+            return False, friendly
 
     async def check_and_complete_posts(self, bot, active_posts: List[Dict[str, Any]], active_groups: List[Dict[str, Any]]):
         """Tự động tắt bài viết khi đã đăng đủ số lần ở tất cả các nhóm đang bật và thông báo cho Admin."""

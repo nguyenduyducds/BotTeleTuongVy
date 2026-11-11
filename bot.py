@@ -1,8 +1,10 @@
-import os
+﻿import os
+import io
 import html
 import re
 import logging
 import asyncio
+from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import (
@@ -13,6 +15,7 @@ from telegram import (
     KeyboardButton,
     InputMediaPhoto,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -32,6 +35,31 @@ logger = logging.getLogger(__name__)
 
 db = Database()
 scheduler = SmartScheduler(db)
+MEDIA_DIR = Path(__file__).parent / "media"
+MEDIA_DIR.mkdir(exist_ok=True)
+
+
+async def safe_edit_message(q, text: str, reply_markup=None, disable_web_page_preview: bool = True):
+    """Chỉnh sửa tin nhắn an toàn, bỏ qua lỗi 'Message is not modified' của Telegram."""
+    try:
+        await q.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        try:
+            await q.message.reply_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=disable_web_page_preview,
+            )
+        except Exception:
+            pass
 
 # ─── Menu bàn phím chính (thay đổi theo trạng thái) ─────────────────────────
 MENU_SETUP = ReplyKeyboardMarkup(
@@ -230,7 +258,7 @@ async def show_setup_screen(update_or_query, context, is_callback=False):
     markup = InlineKeyboardMarkup(kb)
     text = "\n".join(lines)
     if is_callback:
-        await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        await safe_edit_message(update_or_query, text, reply_markup=markup)
     else:
         await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
@@ -266,7 +294,7 @@ async def show_compose_prompt(update_or_query, context, is_callback=False):
     kb = [[InlineKeyboardButton("❌ Huỷ soạn bài", callback_data="compose_cancel")]]
     markup = InlineKeyboardMarkup(kb)
     if is_callback:
-        await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        await safe_edit_message(update_or_query, text, reply_markup=markup)
     else:
         await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
@@ -281,7 +309,7 @@ async def show_posts_list(update_or_query, context, is_callback=False):
         )
         kb = [[InlineKeyboardButton("✍️ Soạn bài đăng mới", callback_data="compose_start")]]
         if is_callback:
-            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+            await safe_edit_message(update_or_query, text, reply_markup=InlineKeyboardMarkup(kb))
         else:
             await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
         return
@@ -320,7 +348,7 @@ async def show_posts_list(update_or_query, context, is_callback=False):
     ]
     text = "\n".join(lines) + "\n\n👇 <i>Bấm vào bài để chỉnh lịch và số lần đăng:</i>"
     if is_callback:
-        await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        await safe_edit_message(update_or_query, text, reply_markup=InlineKeyboardMarkup(kb))
     else:
         await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -341,7 +369,7 @@ async def show_settings_menu(update_or_query, context, is_callback=False):
         [InlineKeyboardButton(f"🧹 Xoá bài cũ: {'🟢 BẬT' if del_old else '⚪ TẮT'}", callback_data="set_toggle_delold")],
     ]
     if is_callback:
-        await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        await safe_edit_message(update_or_query, text, reply_markup=InlineKeyboardMarkup(kb))
     else:
         await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -359,7 +387,7 @@ async def show_logs(update_or_query, context, is_callback=False):
         text = "\n".join(lines)
     kb = [[InlineKeyboardButton("🔄 Làm mới", callback_data="menu_logs")]]
     if is_callback:
-        await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        await safe_edit_message(update_or_query, text, reply_markup=InlineKeyboardMarkup(kb))
     else:
         await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -369,51 +397,51 @@ async def show_userbot_status(update_or_query, context, is_callback=False):
     connected = ub.is_connected()
     name = db.get_setting("userbot_name", "")
     phone = db.get_setting("userbot_phone", "")
-    api_ok = bool(os.getenv("TG_API_ID", "0") != "0" and os.getenv("TG_API_HASH", ""))
-    if not api_ok:
+
+    if connected:
         text = (
-            "🔑 <b>USERBOT</b>\n━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ Chưa cấu hình <code>TG_API_ID</code> và <code>TG_API_HASH</code> trong file <code>.env</code>.\n\n"
-            "1. Vào <a href='https://my.telegram.org'>my.telegram.org</a>\n"
-            "2. API development tools → Tạo app\n"
-            "3. Copy <b>api_id</b> và <b>api_hash</b> vào file <code>.env</code>"
-        )
-        kb = [[InlineKeyboardButton("🔄 Kiểm tra lại", callback_data="ub_status")]]
-    elif connected:
-        text = (
-            f"🔑 <b>USERBOT ĐÃ KẾT NỐI</b>\n━━━━━━━━━━━━━━━━━━\n"
-            f"👤 {html.escape(name)} | 📱 {html.escape(phone)}\n\n"
-            f"✅ Tính năng dò danh sách nhóm sẵn sàng!"
+            f"🔑 <b>USERBOT ĐÃ KẾT NỐI (GỬI KHÔNG CẦN ADD BOT)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👤 Nick: <b>{html.escape(name)}</b> ({html.escape(phone)})\n\n"
+            f"✅ <b>Chế độ Userbot đang BẬT:</b>\n"
+            f"• Tự động đăng bài bằng chính nick cá nhân của bạn vào các nhóm đã chọn.\n"
+            f"• <b>KHÔNG CẦN</b> thêm Bot vào nhóm của người khác!\n"
+            f"• Có thể bấm <b>🔍 Dò danh sách nhóm</b> để tick chọn nhanh 3 nhóm trong nick."
         )
         kb = [
-            [InlineKeyboardButton("🔍 Dò danh sách nhóm", callback_data="ub_scan")],
-            [InlineKeyboardButton("🚪 Đăng xuất", callback_data="ub_logout")],
+            [InlineKeyboardButton("🔍 Dò & Chọn nhóm từ nick này", callback_data="ub_scan")],
+            [InlineKeyboardButton("🚪 Đăng xuất nick", callback_data="ub_logout")],
         ]
     else:
         text = (
-            "🔑 <b>USERBOT</b>\n━━━━━━━━━━━━━━━━━━\n"
-            "✅ API đã cấu hình. Đăng nhập để dò danh sách nhóm tự động."
+            "🔑 <b>ĐĂNG NHẬP NICK CÁ NHÂN (USERBOT)</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💡 <b>Tại sao người khác gửi vào nhóm không cần add Bot?</b>\n"
+            "Vì họ đăng nhập <b>nick Telegram cá nhân</b> vào tool! Khi kết nối ở đây:\n"
+            "• Nick của bạn tự động rải bài vào mọi nhóm bạn tham gia\n"
+            "• <b>Không cần quyền Admin nhóm, không cần thêm @bot vào nhóm!</b>\n"
+            "• Tự động quét danh sách toàn bộ nhóm trong nick để tick chọn\n\n"
+            "👇 <b>Chọn 1 trong 2 cách đăng nhập cực nhanh:</b>"
         )
-        kb = [[InlineKeyboardButton("📱 Đăng nhập bằng SĐT", callback_data="ub_login_start")]]
+        kb = [
+            [InlineKeyboardButton("📷 Quét mã QR bằng ĐT (Khuyên dùng - 5s)", callback_data="ub_qr_login")],
+            [InlineKeyboardButton("📱 Đăng nhập bằng SĐT + Mã OTP", callback_data="ub_login_start")],
+        ]
 
     markup = InlineKeyboardMarkup(kb)
     if is_callback:
-        try:
-            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
-        except Exception:
-            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+        await safe_edit_message(update_or_query, text, reply_markup=markup, disable_web_page_preview=True)
     else:
         await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
 
 
 async def show_group_scan_results(query, context, page=0, force_scan=False):
     ub: UserbotManager = get_manager(db)
-    if force_scan:
-        await query.answer("⏳ Đang quét...")
     groups = await ub.scan_groups(force=force_scan)
     if not groups:
-        await query.edit_message_text(
-            "⚠️ Không tìm thấy nhóm nào.",
+        await safe_edit_message(
+            query,
+            "⚠️ Không tìm thấy nhóm nào trong nick này.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Quay lại", callback_data="ub_status")]]),
         )
         return
@@ -447,33 +475,49 @@ async def show_group_scan_results(query, context, page=0, force_scan=False):
         InlineKeyboardButton("🔄 Quét lại", callback_data="ub_scan"),
         InlineKeyboardButton("⬅️ Quay lại", callback_data="ub_status"),
     ])
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+    await safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(kb))
 
 
 # ─── Lưu bài vừa soạn ────────────────────────────────────────────────────────
-def _save_composed_post(message, storage_chat_id: int) -> int:
-    """Lưu bài soạn vào DB. Trả về post_id."""
-    has_photo = bool(message.photo or message.document or message.video or message.animation)
-    raw_text = message.text or message.caption or ""
+async def _save_composed_from_pending(bot, pending: dict) -> int:
+    """Lưu bài soạn vào DB (kèm tải ảnh/video về máy để Userbot gửi không cần Bot). Trả về post_id."""
+    raw_text = pending.get("content_text", "")
+    file_id = pending.get("file_id")
+    media_type = pending.get("media_type", "")
+    ext = pending.get("ext", ".jpg")
+    has_media = bool(file_id)
+
     clean = [l.strip() for l in raw_text.splitlines() if l.strip()]
     first = clean[0] if clean else ""
-    type_prefix = "🖼 " if has_photo else "📝 "
+    type_prefix = "🖼 " if has_media else "📝 "
     title = f"{type_prefix}{first[:40]}" if first else f"{type_prefix}Bài lúc {datetime.now().strftime('%H:%M %d/%m')}"
     preview = raw_text[:200] + ("..." if len(raw_text) > 200 else "")
+    if has_media:
+        preview = f"[CÓ ẢNH] {preview}"[:200]
 
     post_id = db.add_post(
         title=title,
         preview_text=preview,
-        storage_chat_id=storage_chat_id,
-        storage_message_id=message.message_id,
+        storage_chat_id=pending["chat_id"],
+        storage_message_id=pending["message_id"],
         forward_origin_title="Bài soạn trực tiếp",
-        send_mode="copy",   # copy để ẩn nguồn (bài tự soạn)
+        send_mode="copy",
         max_runs=3,
         interval_minutes=30,
+        content_text=raw_text,
+        media_path="",
+        media_type=media_type,
     )
-    # Lưu cờ has_photo vào settings riêng (đơn giản)
-    if has_photo:
-        db.update_post(post_id, preview_text=f"[CÓ ẢNH] {preview}"[:200])
+
+    if file_id:
+        try:
+            tg_file = await bot.get_file(file_id)
+            dest = MEDIA_DIR / f"post_{post_id}{ext}"
+            await tg_file.download_to_drive(custom_path=str(dest))
+            db.update_post(post_id, media_path=str(dest))
+        except Exception as e:
+            logger.warning(f"Không thể tải media cho bài #{post_id}: {e}")
+
     db.ensure_progress_rows(post_id)
     return post_id
 
@@ -617,10 +661,35 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             "🔁 Bấm <b>Soạn lại</b> để gửi lại bài khác"
         )
 
+        # Trích xuất thông tin media nếu có để lưu không cần forward lại
+        file_id = None
+        media_type = ""
+        ext = ".jpg"
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+            media_type = "photo"
+            ext = ".jpg"
+        elif msg.video:
+            file_id = msg.video.file_id
+            media_type = "video"
+            ext = ".mp4"
+        elif msg.animation:
+            file_id = msg.animation.file_id
+            media_type = "animation"
+            ext = ".mp4"
+        elif msg.document:
+            file_id = msg.document.file_id
+            media_type = "document"
+            ext = Path(msg.document.file_name or "file.bin").suffix or ".bin"
+
         # Lưu message tạm chờ xác nhận
         context.user_data["pending_compose"] = {
             "chat_id": update.effective_chat.id,
             "message_id": msg.message_id,
+            "content_text": raw_text,
+            "file_id": file_id,
+            "media_type": media_type,
+            "ext": ext,
         }
         context.user_data.pop("compose_mode", None)
 
@@ -637,14 +706,19 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     # 3. Chờ nhập userbot OTP / 2FA
     if awaiting:
         mode = awaiting.get("mode", "")
-        if mode in ("ub_phone", "ub_code", "ub_2fa") and not getattr(msg, "forward_origin", None):
+        if mode in ("ub_phone", "ub_code", "ub_2fa", "ub_qr_2fa") and not getattr(msg, "forward_origin", None):
             if mode == "ub_phone":
                 context.user_data.pop("awaiting_input", None)
-                await msg.reply_text("⏳ Đang gửi OTP...")
+                await msg.reply_text("⏳ Đang gửi mã OTP về Telegram của bạn...")
                 res = await ub.request_code(text)
                 if res == "CODE_SENT":
                     context.user_data["awaiting_input"] = {"mode": "ub_code"}
-                    await msg.reply_text("📱 OTP đã gửi! Nhập mã 5 số từ app Telegram vào đây:")
+                    await msg.reply_text(
+                        "📱 <b>OTP đã gửi!</b>\n\n"
+                        "⚠️ <b>LƯU Ý QUAN TRỌNG:</b> Hãy gõ 5 số OTP <b>cách nhau bằng dấu cách</b> "
+                        "(ví dụ mã là <code>12345</code> thì gõ: <code>1 2 3 4 5</code>) để Telegram không tự huỷ mã!",
+                        parse_mode="HTML",
+                    )
                 else:
                     await msg.reply_text(f"❌ Lỗi: {html.escape(res)}", parse_mode="HTML")
                 return
@@ -654,22 +728,30 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 if res == "OK":
                     context.user_data.pop("awaiting_input", None)
                     await msg.reply_text(
-                        f"🎉 <b>Đăng nhập thành công!</b> 👤 {html.escape(db.get_setting('userbot_name', ''))}",
+                        f"🎉 <b>Đăng nhập Userbot thành công!</b>\n"
+                        f"👤 Nick: <b>{html.escape(db.get_setting('userbot_name', ''))}</b>\n\n"
+                        f"✅ Giờ Bot đã có thể gửi bài vào <b>mọi nhóm mà KHÔNG CẦN thêm Bot vào nhóm!</b>",
                         parse_mode="HTML",
                         reply_markup=get_menu_keyboard(),
                     )
                 elif res == "NEED_2FA":
                     context.user_data["awaiting_input"] = {"mode": "ub_2fa"}
-                    await msg.reply_text("🔒 Nhập mật khẩu 2FA:")
+                    await msg.reply_text("🔒 Tài khoản có bật bảo mật 2 lớp (2FA). Hãy nhập mật khẩu 2FA vào đây:")
                 else:
-                    await msg.reply_text(f"❌ {html.escape(res)}", parse_mode="HTML")
+                    await msg.reply_text(
+                        f"❌ {html.escape(res)}\n\n"
+                        f"💡 Nhớ gõ cách từng số (ví dụ: <code>1 2 3 4 5</code>) hoặc dùng <b>📷 Quét mã QR</b> cho nhanh!",
+                        parse_mode="HTML",
+                    )
                 return
-            if mode == "ub_2fa":
+            if mode in ("ub_2fa", "ub_qr_2fa"):
                 context.user_data.pop("awaiting_input", None)
-                res = await ub.sign_in("", password=text)
+                res = await (ub.finish_2fa_after_qr(text) if mode == "ub_qr_2fa" else ub.sign_in("", password=text))
                 if res == "OK":
                     await msg.reply_text(
-                        f"🎉 <b>Đăng nhập thành công!</b>",
+                        f"🎉 <b>Đăng nhập Userbot thành công!</b>\n"
+                        f"👤 Nick: <b>{html.escape(db.get_setting('userbot_name', ''))}</b>\n\n"
+                        f"✅ Giờ Bot đã có thể gửi bài vào mọi nhóm mà không cần thêm Bot vào nhóm!",
                         parse_mode="HTML",
                         reply_markup=get_menu_keyboard(),
                     )
@@ -801,230 +883,365 @@ async def _handle_add_group_by_username(update, context, group_username: str):
 # ─── Callback handler ─────────────────────────────────────────────────────────
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     data = q.data or ""
     ub: UserbotManager = get_manager(db)
+    answered = False
 
-    # Menu
-    if data == "menu_posts":
-        await show_posts_list(q, context, True)
-        return
-    if data == "menu_groups":
-        await show_setup_screen(q, context, True)
-        return
-    if data == "menu_logs":
-        await show_logs(q, context, True)
-        return
-    if data == "compose_start":
-        context.user_data["compose_mode"] = True
-        await show_compose_prompt(q, context, True)
-        return
-    if data == "compose_cancel":
-        context.user_data.pop("compose_mode", None)
-        context.user_data.pop("pending_compose", None)
-        await q.edit_message_text(
-            "❌ Đã huỷ soạn bài. Bấm <b>✍️ Soạn bài đăng mới</b> khi muốn soạn lại.",
-            parse_mode="HTML",
-        )
-        return
-    if data == "compose_restart":
-        context.user_data.pop("pending_compose", None)
-        context.user_data["compose_mode"] = True
-        await show_compose_prompt(q, context, True)
-        return
-    if data == "compose_confirm":
-        pending = context.user_data.pop("pending_compose", None)
-        if not pending:
-            await q.answer("⚠️ Không tìm thấy bài soạn! Hãy soạn lại.", show_alert=True)
-            return
-        # Lấy message gốc để lưu
-        try:
-            orig_msg = await context.bot.forward_message(
-                chat_id=pending["chat_id"],
-                from_chat_id=pending["chat_id"],
-                message_id=pending["message_id"],
-            )
-        except Exception:
-            await q.answer("❌ Lỗi lưu bài! Thử lại.", show_alert=True)
-            return
-        post_id = _save_composed_post(orig_msg, pending["chat_id"])
-        await q.edit_message_text(
-            f"✅ <b>Đã lưu bài #{post_id}!</b>\n\n"
-            f"Bây giờ cài <b>số lần đăng</b> và <b>lịch đăng</b> rồi bấm <b>▶️ Bật chạy</b>:",
-            parse_mode="HTML",
-        )
-        await q.message.reply_text(
-            build_post_detail_text(post_id),
-            parse_mode="HTML",
-            reply_markup=build_post_keyboard(post_id),
-        )
-        return
-    if data == "posts_start_all":
-        for p in db.get_posts():
-            db.update_post(p["id"], active=1)
-        await q.answer("▶️ Đã BẬT tất cả!", show_alert=True)
-        await show_posts_list(q, context, True)
-        return
-    if data == "posts_stop_all":
-        for p in db.get_posts():
-            db.update_post(p["id"], active=0)
-        await q.answer("⏸ Đã DỪNG tất cả!", show_alert=True)
-        await show_posts_list(q, context, True)
-        return
-
-    # Settings
-    if data == "set_cycle_stagger":
-        opts = ["1","3","5","10","15"]; curr = db.get_setting("stagger_minutes","5")
-        db.set_setting("stagger_minutes", opts[(opts.index(curr)+1)%len(opts)] if curr in opts else "5")
-        await show_settings_menu(q, context, True); return
-    if data == "set_cycle_cooldown":
-        opts = ["1","2","5","10","15"]; curr = db.get_setting("min_group_cooldown","5")
-        db.set_setting("min_group_cooldown", opts[(opts.index(curr)+1)%len(opts)] if curr in opts else "5")
-        await show_settings_menu(q, context, True); return
-    if data == "set_toggle_delold":
-        db.set_setting("delete_previous_ad", "0" if db.get_setting("delete_previous_ad","0")=="1" else "1")
-        await show_settings_menu(q, context, True); return
-
-    # Groups
-    if data.startswith("grp_toggle:"):
-        cid = int(data.split(":")[1])
-        res = db.toggle_group(cid)
-        if res is False:
-            await q.answer("⚠️ Chỉ được bật tối đa 3 nhóm!", show_alert=True)
-        await show_setup_screen(q, context, True); return
-    if data.startswith("grp_del:"):
-        db.remove_group(int(data.split(":")[1]))
-        await q.answer("🗑 Đã xoá nhóm.")
-        await show_setup_screen(q, context, True); return
-
-    # Userbot
-    if data == "ub_status":
-        await show_userbot_status(q, context, True); return
-    if data == "ub_login_start":
-        context.user_data["awaiting_input"] = {"mode": "ub_phone"}
-        await q.message.reply_text("📱 Nhập SĐT Telegram (kèm mã vùng, ví dụ: <code>+84912345678</code>):", parse_mode="HTML")
-        return
-    if data == "ub_logout":
-        await ub.disconnect()
-        await q.answer("✅ Đã đăng xuất!", show_alert=True)
-        await show_userbot_status(q, context, True); return
-    if data == "ub_scan":
-        await show_group_scan_results(q, context, 0, True); return
-    if data.startswith("ub_scan_page:"):
-        await show_group_scan_results(q, context, int(data.split(":")[1]), False); return
-    if data.startswith("ub_grp_toggle:"):
-        parts = data.split(":")
-        cid, page = int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
-        cache = ub._scan_cache
-        grp = next((g for g in cache if g["chat_id"] == cid), None)
-        if grp:
-            existing = db.get_group(cid)
-            if existing:
-                res = db.toggle_group(cid)
-                if res is False:
-                    await q.answer("⚠️ Chỉ được bật tối đa 3 nhóm!", show_alert=True)
-                else:
-                    await q.answer(f"{'🟢 BẬT' if res else '⚪ TẮT'}: {grp['title'][:30]}")
-            else:
-                res = db.add_or_update_group(cid, grp["title"], grp.get("username"))
-                if not res["active"]:
-                    await q.answer("⚠️ Đã đủ 3 nhóm!", show_alert=True)
-                else:
-                    await q.answer(f"✅ Đã thêm: {grp['title'][:30]}")
-            for g in ub._scan_cache:
-                if g["chat_id"] == cid:
-                    db_g = db.get_group(cid)
-                    g["in_db"] = db_g is not None
-                    g["active"] = bool(db_g and db_g.get("active", 0)) if db_g else False
-        await show_group_scan_results(q, context, page, False); return
-
-    # Posts
-    if data.startswith("post_view:"):
-        pid = int(data.split(":")[1])
-        await q.edit_message_text(build_post_detail_text(pid), parse_mode="HTML", reply_markup=build_post_keyboard(pid)); return
-    if data.startswith("post_toggle:"):
-        pid = int(data.split(":")[1])
-        post = db.get_post(pid)
-        if post:
-            new_active = 0 if post["active"] else 1
-            if new_active == 1:
-                prog = db.get_post_progress(pid)
-                max_r = int(post["max_runs"])
-                if max_r > 0 and prog and all(int(p["runs_done"]) >= max_r for p in prog):
-                    db.reset_post_progress(pid)
-            db.update_post(pid, active=new_active)
-            await q.edit_message_text(build_post_detail_text(pid), parse_mode="HTML", reply_markup=build_post_keyboard(pid))
-        return
-    if data.startswith("post_runs:"):
-        _, ps, rs = data.split(":"); pid = int(ps)
-        db.update_post(pid, max_runs=int(rs))
-        await q.edit_message_text(build_post_detail_text(pid), parse_mode="HTML", reply_markup=build_post_keyboard(pid)); return
-    if data.startswith("post_int:"):
-        _, ps, is_ = data.split(":"); pid = int(ps)
-        db.update_post(pid, interval_minutes=int(is_), fixed_times="")
-        await q.edit_message_text(build_post_detail_text(pid), parse_mode="HTML", reply_markup=build_post_keyboard(pid)); return
-    if data.startswith("post_mode:"):
-        pid = int(data.split(":")[1]); post = db.get_post(pid)
-        if post:
-            db.update_post(pid, send_mode="copy" if post["send_mode"]=="forward" else "forward")
-            await q.edit_message_text(build_post_detail_text(pid), parse_mode="HTML", reply_markup=build_post_keyboard(pid))
-        return
-    if data.startswith("post_ask_runs:"):
-        pid = int(data.split(":")[1])
-        context.user_data["awaiting_input"] = {"mode": "runs", "post_id": pid}
-        await q.message.reply_text(f"✏️ Nhập số lần đăng cho Bài #{pid} (0 = vô hạn):"); return
-    if data.startswith("post_ask_int:"):
-        pid = int(data.split(":")[1])
-        context.user_data["awaiting_input"] = {"mode": "interval", "post_id": pid}
-        await q.message.reply_text(f"✏️ Nhập số phút giữa mỗi lần đăng:"); return
-    if data.startswith("post_ask_time:"):
-        pid = int(data.split(":")[1])
-        context.user_data["awaiting_input"] = {"mode": "fixed_time", "post_id": pid}
-        await q.message.reply_text(f"🕒 Nhập giờ cố định, cách nhau bởi dấu phẩy:\nVí dụ: <code>08:00, 12:30, 20:00</code>\n(gõ 'xoa' để xoá giờ cố định)", parse_mode="HTML")
-        return
-    if data.startswith("post_preview:"):
-        pid = int(data.split(":")[1]); post = db.get_post(pid)
-        if post:
+    async def ans(text: str = "", show_alert: bool = False):
+        nonlocal answered
+        if not answered:
+            answered = True
             try:
-                await context.bot.copy_message(q.message.chat_id, post["storage_chat_id"], post["storage_message_id"])
+                await q.answer(text=text or None, show_alert=show_alert)
+            except Exception:
+                pass
+
+    try:
+        # Menu
+        if data == "menu_posts":
+            await ans()
+            await show_posts_list(q, context, True)
+            return
+        if data == "menu_groups":
+            await ans()
+            await show_setup_screen(q, context, True)
+            return
+        if data == "menu_logs":
+            await ans()
+            await show_logs(q, context, True)
+            return
+        if data == "compose_start":
+            await ans()
+            context.user_data["compose_mode"] = True
+            await show_compose_prompt(q, context, True)
+            return
+        if data == "compose_cancel":
+            await ans("Đã huỷ soạn bài")
+            context.user_data.pop("compose_mode", None)
+            context.user_data.pop("pending_compose", None)
+            await safe_edit_message(
+                q,
+                "❌ Đã huỷ soạn bài. Bấm <b>✍️ Soạn bài đăng mới</b> khi muốn soạn lại.",
+            )
+            return
+        if data == "compose_restart":
+            await ans()
+            context.user_data.pop("pending_compose", None)
+            context.user_data["compose_mode"] = True
+            await show_compose_prompt(q, context, True)
+            return
+        if data == "compose_confirm":
+            pending = context.user_data.pop("pending_compose", None)
+            if not pending:
+                await ans("⚠️ Không tìm thấy bài soạn! Hãy soạn lại.", show_alert=True)
+                return
+            await ans("✅ Đang lưu bài...")
+            post_id = await _save_composed_from_pending(context.bot, pending)
+            await safe_edit_message(
+                q,
+                f"✅ <b>Đã lưu bài #{post_id}!</b>\n\n"
+                f"Bây giờ cài <b>số lần đăng</b> và <b>lịch đăng</b> bên dưới rồi bấm <b>▶️ Bật chạy</b>:",
+            )
+            await q.message.reply_text(
+                build_post_detail_text(post_id),
+                parse_mode="HTML",
+                reply_markup=build_post_keyboard(post_id),
+            )
+            return
+        if data == "posts_start_all":
+            for p in db.get_posts():
+                db.update_post(p["id"], active=1)
+            await ans("▶️ Đã BẬT tất cả bài đăng!", show_alert=True)
+            await show_posts_list(q, context, True)
+            return
+        if data == "posts_stop_all":
+            for p in db.get_posts():
+                db.update_post(p["id"], active=0)
+            await ans("⏸ Đã DỪNG tất cả bài đăng!", show_alert=True)
+            await show_posts_list(q, context, True)
+            return
+
+        # Settings
+        if data == "set_cycle_stagger":
+            opts = ["1", "3", "5", "10", "15"]
+            curr = db.get_setting("stagger_minutes", "5")
+            nxt = opts[(opts.index(curr) + 1) % len(opts)] if curr in opts else "5"
+            db.set_setting("stagger_minutes", nxt)
+            await ans(f"⏱ Lệch nhóm: {nxt} phút")
+            await show_settings_menu(q, context, True)
+            return
+        if data == "set_cycle_cooldown":
+            opts = ["1", "2", "5", "10", "15"]
+            curr = db.get_setting("min_group_cooldown", "5")
+            nxt = opts[(opts.index(curr) + 1) % len(opts)] if curr in opts else "5"
+            db.set_setting("min_group_cooldown", nxt)
+            await ans(f"⏳ Nghỉ trong nhóm: {nxt} phút")
+            await show_settings_menu(q, context, True)
+            return
+        if data == "set_toggle_delold":
+            new_val = "0" if db.get_setting("delete_previous_ad", "0") == "1" else "1"
+            db.set_setting("delete_previous_ad", new_val)
+            await ans(f"🧹 Xoá bài cũ: {'BẬT' if new_val == '1' else 'TẮT'}")
+            await show_settings_menu(q, context, True)
+            return
+
+        # Groups
+        if data.startswith("grp_toggle:"):
+            cid = int(data.split(":")[1])
+            res = db.toggle_group(cid)
+            if res is False:
+                await ans("⚠️ Chỉ được bật tối đa 3 nhóm!", show_alert=True)
+            else:
+                await ans("🟢 Đã bật nhóm!" if res else "⚪ Đã tắt nhóm!")
+            await show_setup_screen(q, context, True)
+            return
+        if data.startswith("grp_del:"):
+            db.remove_group(int(data.split(":")[1]))
+            await ans("🗑 Đã xoá nhóm.")
+            await show_setup_screen(q, context, True)
+            return
+
+        # Userbot
+        if data == "ub_status":
+            await ans()
+            await show_userbot_status(q, context, True)
+            return
+        if data == "ub_qr_login":
+            await ans("⏳ Đang tạo mã QR...")
+            try:
+                qr_login, png_bytes = await ub.create_qr_login()
             except Exception as e:
+                await q.message.reply_text(f"❌ Không tạo được mã QR: {html.escape(str(e))}", parse_mode="HTML")
+                return
+
+            caption = (
+                "📷 <b>QUÉT MÃ QR ĐỂ ĐĂNG NHẬP NICK CÁ NHÂN</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "1️⃣ Mở app <b>Telegram trên điện thoại</b>\n"
+                "2️⃣ Vào <b>Cài đặt (Settings)</b> → <b>Thiết bị (Devices)</b>\n"
+                "3️⃣ Bấm <b>Liên kết thiết bị máy tính (Link Desktop Device)</b>\n"
+                "4️⃣ Đưa camera quét mã QR này (hiệu lực 2 phút)!\n\n"
+                "<i>✨ Sau khi quét xong, Bot sẽ tự báo thành công ngay!</i>"
+            )
+            if png_bytes:
+                qr_msg = await q.message.reply_photo(
+                    photo=io.BytesIO(png_bytes),
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            else:
+                qr_msg = await q.message.reply_text(
+                    caption + f"\n\nLink đăng nhập: <code>{html.escape(qr_login.url)}</code>",
+                    parse_mode="HTML",
+                )
+
+            chat_id = q.message.chat_id
+
+            async def _wait_qr():
                 try:
-                    await context.bot.forward_message(q.message.chat_id, post["storage_chat_id"], post["storage_message_id"])
-                except Exception as e2:
-                    await q.message.reply_text(f"❌ Không xem được: {e2}")
-        return
-    if data.startswith("post_sendnow:"):
-        pid = int(data.split(":")[1]); post = db.get_post(pid)
-        groups = db.get_groups(active_only=True)
-        if not post or not groups:
-            await q.answer("⚠️ Không có bài hoặc nhóm!", show_alert=True); return
-        db.ensure_progress_rows(pid)
-        prog = db.get_post_progress(pid)
-        prog.sort(key=lambda p: (p["runs_done"], p.get("last_sent_at") or ""))
-        tg = db.get_group(prog[0]["group_id"])
-        if ub.is_connected():
-            ok, detail = await ub.forward_post(post, tg["chat_id"])
-        else:
-            ok = await scheduler.send_single_post_to_group(context.bot, post, tg, datetime.now())
-            detail = ""
-        if ok:
-            await q.answer(f"🚀 Đã gửi vào: {tg['title'][:30]}!", show_alert=True)
-        else:
-            await q.answer(f"❌ Thất bại: {detail[:50]}", show_alert=True)
-        await q.edit_message_text(build_post_detail_text(pid), parse_mode="HTML", reply_markup=build_post_keyboard(pid))
-        return
-    if data.startswith("post_reset:"):
-        pid = int(data.split(":")[1])
-        db.reset_post_progress(pid)
-        await q.answer("♻️ Đã reset về 0!", show_alert=True)
-        await q.edit_message_text(build_post_detail_text(pid), parse_mode="HTML", reply_markup=build_post_keyboard(pid))
-        return
-    if data.startswith("post_del:"):
-        pid = int(data.split(":")[1])
-        db.delete_post(pid)
-        await q.answer(f"🗑 Đã xoá Bài #{pid}!")
-        await show_posts_list(q, context, True)
-        return
+                    await qr_login.wait(timeout=120)
+                    await ub._save_logged_in_info()
+                    try:
+                        await qr_msg.delete()
+                    except Exception:
+                        pass
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🎉 <b>ĐĂNG NHẬP USERBOT THÀNH CÔNG!</b>\n"
+                            f"👤 Nick: <b>{html.escape(db.get_setting('userbot_name', ''))}</b>\n\n"
+                            f"✅ Từ giờ Bot sẽ tự động dùng nick này đăng bài vào các nhóm — "
+                            f"<b>KHÔNG CẦN thêm @bot vào nhóm nữa!</b>\n"
+                            f"👉 Bạn có thể quay lại bài đăng bấm <b>🚀 Gửi thử ngay</b> hoặc vào <b>🔍 Dò danh sách nhóm</b>!"
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=get_menu_keyboard(),
+                    )
+                except asyncio.TimeoutError:
+                    try:
+                        await qr_msg.delete()
+                    except Exception:
+                        pass
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="⌛ Mã QR đã hết hạn (quá 2 phút). Bấm <b>🔑 Userbot</b> → <b>📷 Quét mã QR</b> để lấy mã mới.",
+                        parse_mode="HTML",
+                    )
+                except Exception as exc:
+                    if "SessionPasswordNeeded" in type(exc).__name__:
+                        context.user_data["awaiting_input"] = {"mode": "ub_qr_2fa"}
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text="🔒 Đã quét QR thành công! Nick của bạn có bật mật khẩu 2 lớp (2FA).\n👉 Hãy gõ mật khẩu 2FA vào đây để hoàn tất:",
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"❌ Lỗi đăng nhập QR: {html.escape(str(exc))}",
+                            parse_mode="HTML",
+                        )
+
+            asyncio.create_task(_wait_qr())
+            return
+
+        if data == "ub_login_start":
+            await ans()
+            context.user_data["awaiting_input"] = {"mode": "ub_phone"}
+            await q.message.reply_text(
+                "📱 Nhập SĐT Telegram của bạn (ví dụ: <code>+84912345678</code> hoặc <code>0912345678</code>):",
+                parse_mode="HTML",
+            )
+            return
+        if data == "ub_logout":
+            await ub.disconnect()
+            await ans("✅ Đã đăng xuất nick!", show_alert=True)
+            await show_userbot_status(q, context, True)
+            return
+        if data == "ub_scan":
+            await ans("⏳ Đang quét danh sách nhóm trong nick...")
+            await show_group_scan_results(q, context, 0, True)
+            return
+        if data.startswith("ub_scan_page:"):
+            await ans()
+            await show_group_scan_results(q, context, int(data.split(":")[1]), False)
+            return
+        if data.startswith("ub_grp_toggle:"):
+            parts = data.split(":")
+            cid, page = int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
+            cache = ub._scan_cache
+            grp = next((g for g in cache if g["chat_id"] == cid), None)
+            if grp:
+                existing = db.get_group(cid)
+                if existing:
+                    res = db.toggle_group(cid)
+                    if res is False:
+                        await ans("⚠️ Chỉ được bật tối đa 3 nhóm!", show_alert=True)
+                    else:
+                        await ans(f"{'🟢 BẬT' if res else '⚪ TẮT'}: {grp['title'][:30]}")
+                else:
+                    res = db.add_or_update_group(cid, grp["title"], grp.get("username"))
+                    if not res["active"]:
+                        await ans("⚠️ Đã đủ 3 nhóm đang bật!", show_alert=True)
+                    else:
+                        await ans(f"✅ Đã chọn nhóm: {grp['title'][:30]}")
+                for g in ub._scan_cache:
+                    if g["chat_id"] == cid:
+                        db_g = db.get_group(cid)
+                        g["in_db"] = db_g is not None
+                        g["active"] = bool(db_g and db_g.get("active", 0)) if db_g else False
+            await show_group_scan_results(q, context, page, False)
+            return
+
+        # Posts
+        if data.startswith("post_view:"):
+            await ans()
+            pid = int(data.split(":")[1])
+            await safe_edit_message(q, build_post_detail_text(pid), reply_markup=build_post_keyboard(pid))
+            return
+        if data.startswith("post_toggle:"):
+            pid = int(data.split(":")[1])
+            post = db.get_post(pid)
+            if post:
+                new_active = 0 if post["active"] else 1
+                if new_active == 1:
+                    prog = db.get_post_progress(pid)
+                    max_r = int(post["max_runs"])
+                    if max_r > 0 and prog and all(int(p["runs_done"]) >= max_r for p in prog):
+                        db.reset_post_progress(pid)
+                db.update_post(pid, active=new_active)
+                await ans("▶️ Đã BẬT chạy tự động!" if new_active else "⏸ Đã TẠM DỪNG bài đăng!")
+                await safe_edit_message(q, build_post_detail_text(pid), reply_markup=build_post_keyboard(pid))
+            return
+        if data.startswith("post_runs:"):
+            _, ps, rs = data.split(":")
+            pid, r_val = int(ps), int(rs)
+            db.update_post(pid, max_runs=r_val)
+            await ans(f"🎯 Đã đặt: {'Vô hạn' if r_val == 0 else f'{r_val} lần/nhóm'}")
+            await safe_edit_message(q, build_post_detail_text(pid), reply_markup=build_post_keyboard(pid))
+            return
+        if data.startswith("post_int:"):
+            _, ps, is_ = data.split(":")
+            pid, i_val = int(ps), int(is_)
+            db.update_post(pid, interval_minutes=i_val, fixed_times="")
+            await ans(f"⏱ Đã đặt chu kỳ: mỗi {i_val} phút")
+            await safe_edit_message(q, build_post_detail_text(pid), reply_markup=build_post_keyboard(pid))
+            return
+        if data.startswith("post_mode:"):
+            pid = int(data.split(":")[1])
+            post = db.get_post(pid)
+            if post:
+                new_m = "copy" if post["send_mode"] == "forward" else "forward"
+                db.update_post(pid, send_mode=new_m)
+                await ans(f"🔄 Đã đổi chế độ: {'Copy (ẩn nguồn)' if new_m == 'copy' else 'Forward'}")
+                await safe_edit_message(q, build_post_detail_text(pid), reply_markup=build_post_keyboard(pid))
+            return
+        if data.startswith("post_ask_runs:"):
+            await ans()
+            pid = int(data.split(":")[1])
+            context.user_data["awaiting_input"] = {"mode": "runs", "post_id": pid}
+            await q.message.reply_text(f"✏️ Nhập số lần đăng cho Bài #{pid} (gõ 0 = vô hạn):")
+            return
+        if data.startswith("post_ask_int:"):
+            await ans()
+            pid = int(data.split(":")[1])
+            context.user_data["awaiting_input"] = {"mode": "interval", "post_id": pid}
+            await q.message.reply_text("✏️ Nhập số phút giữa mỗi lần đăng (ví dụ: 15):")
+            return
+        if data.startswith("post_ask_time:"):
+            await ans()
+            pid = int(data.split(":")[1])
+            context.user_data["awaiting_input"] = {"mode": "fixed_time", "post_id": pid}
+            await q.message.reply_text(
+                "🕒 Nhập giờ cố định, cách nhau bởi dấu phẩy:\nVí dụ: <code>08:00, 12:30, 20:00</code>\n(gõ 'xoa' để xoá giờ cố định)",
+                parse_mode="HTML",
+            )
+            return
+        if data.startswith("post_preview:"):
+            await ans("👁 Đang gửi bản xem trước...")
+            pid = int(data.split(":")[1])
+            post = db.get_post(pid)
+            if post:
+                try:
+                    await context.bot.copy_message(q.message.chat_id, post["storage_chat_id"], post["storage_message_id"])
+                except Exception:
+                    try:
+                        await context.bot.forward_message(q.message.chat_id, post["storage_chat_id"], post["storage_message_id"])
+                    except Exception as e2:
+                        await q.message.reply_text(f"❌ Không xem được: {e2}")
+            return
+        if data.startswith("post_sendnow:"):
+            pid = int(data.split(":")[1])
+            post = db.get_post(pid)
+            groups = db.get_groups(active_only=True)
+            if not post or not groups:
+                await ans("⚠️ Chưa có bài hoặc chưa bật nhóm nào!", show_alert=True)
+                return
+            db.ensure_progress_rows(pid)
+            prog = db.get_post_progress(pid)
+            prog.sort(key=lambda p: (p["runs_done"], p.get("last_sent_at") or ""))
+            tg = db.get_group(prog[0]["group_id"])
+            ok, detail = await scheduler.send_single_post_to_group(context.bot, post, tg, datetime.now())
+            if ok:
+                await ans(f"🚀 Đã gửi thành công vào:\n{tg['title'][:40]}!", show_alert=True)
+            else:
+                await ans(f"❌ Chưa gửi được:\n{detail[:140]}", show_alert=True)
+            await safe_edit_message(q, build_post_detail_text(pid), reply_markup=build_post_keyboard(pid))
+            return
+        if data.startswith("post_reset:"):
+            pid = int(data.split(":")[1])
+            db.reset_post_progress(pid)
+            await ans("♻️ Đã reset số lần đăng về 0!", show_alert=True)
+            await safe_edit_message(q, build_post_detail_text(pid), reply_markup=build_post_keyboard(pid))
+            return
+        if data.startswith("post_del:"):
+            pid = int(data.split(":")[1])
+            db.delete_post(pid)
+            await ans(f"🗑 Đã xoá Bài #{pid}!")
+            await show_posts_list(q, context, True)
+            return
+    finally:
+        await ans()
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
